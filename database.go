@@ -1,15 +1,19 @@
 package vgmusic
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/PuerkitoBio/goquery"
-	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -27,10 +31,9 @@ type Database struct {
 	Consoles []Console `json:"consoles"`
 }
 
-func NewDatabase() *Database {
-	return &Database{
-		Entries: make(map[string]Song),
-	}
+type DatabaseStats struct {
+	NEntries  int
+	NConsoles int
 }
 
 // protected functions
@@ -54,7 +57,7 @@ func (db *Database) parseConsoles(i int, s *goquery.Selection) {
 					warnL.Printf("parsing section url %s failed", ru)
 				}
 
-				fu := BASE.ResolveReference(u).String()
+				fu := strings.TrimSuffix(BASE.ResolveReference(u).String(), "/")
 
 				name := selection.Text()
 
@@ -68,6 +71,12 @@ func (db *Database) parseConsoles(i int, s *goquery.Selection) {
 }
 
 // public functions
+
+func NewDatabase() *Database {
+	return &Database{
+		Entries: make(map[string]Song),
+	}
+}
 
 func (db *Database) ParseConsoles() error {
 	resp, err := client.Get(BASE.String())
@@ -86,53 +95,109 @@ func (db *Database) ParseConsoles() error {
 		return err
 	}
 
+	// ensure there are no duplicates if refreshed twice
+	db.Consoles = nil
 	doc.Find("p.menu").Each(db.parseConsoles)
 
 	return nil
 }
 
 func (db *Database) Refresh() error {
+
+	oldStats := db.Stats()
+
+	var g errgroup.Group
 	var mu sync.Mutex
-	g := new(errgroup.Group)
 
-	for _, console := range db.Consoles {
+	for i := range db.Consoles {
 
-		g.Go(func() error {
+		// https://golang.org/doc/faq#closures_and_goroutines
+		i := i
 
-			mu.Lock()
-			defer mu.Unlock()
+		g.Go(
+			func() error {
+				// so console can be modified in-place
+				c := &db.Consoles[i]
 
-			songs, err := console.ParseSongs()
+				songs, err := c.ParseSongs()
+				nSongs := len(songs)
 
-			if len(songs) > 0 {
-				for _, song := range songs {
-					db.Entries[song.Checksum] = song
+				if nSongs > 0 {
+					// make sure only one thread adds the entries at a time
+					mu.Lock()
+					for _, song := range songs {
+						db.Entries[song.Checksum] = song
+					}
+					mu.Unlock()
 				}
 
-				infoL.Printf("parsed %d songs for console %s", len(songs), console.Name)
+				infoL.Printf("parsed %d songs for console %s", nSongs, c.Name)
 
-			} else if err != nil {
-				infoL.Printf("skipping console %s: no new songs found", console.Name)
-			}
-
-			return err
-		})
+				return err
+			},
+		)
 
 	}
 
-	// block main thread until all songs have been parsed or there was an error.
-	return g.Wait()
+	err := g.Wait()
 
+	newStats := db.Stats()
+
+	infoL.Printf(
+		"refreshed database (%d new entries)",
+		newStats.NEntries-oldStats.NEntries,
+	)
+
+	return err
+
+}
+
+func (db *Database) Stats() DatabaseStats {
+	return DatabaseStats{
+		NEntries:  len(db.Entries),
+		NConsoles: len(db.Consoles),
+	}
+}
+
+func (db *Database) Search(criteria func(s Song) bool) []Song {
+	var songs []Song
+
+	for _, song := range db.Entries {
+		if criteria(song) {
+			songs = append(songs, song)
+		}
+	}
+
+	return songs
 }
 
 func (db *Database) Dump(w io.Writer) (int, error) {
 	infoL.Println("dumping database")
-	b, err := json.Marshal(db)
+
+	b, err := json.MarshalIndent(db, "", "  ")
 	if err != nil {
 		return 0, err
 	}
 
 	return w.Write(b)
+}
+
+func (db *Database) DumpC(w io.Writer) (int, error) {
+	infoL.Println("dumping database (compressed as gzip)")
+
+	zw := gzip.NewWriter(w)
+	defer zw.Close()
+
+	zw.Name = "database.json"
+	zw.ModTime = time.Now().UTC()
+
+	n, err := db.Dump(zw)
+
+	if err := zw.Close(); err != nil {
+		return 0, err
+	}
+
+	return n, err
 }
 
 func (db *Database) Load(r io.Reader) error {
@@ -143,6 +208,26 @@ func (db *Database) Load(r io.Reader) error {
 	}
 
 	if err := json.Unmarshal(b, &db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (db *Database) LoadC(r io.Reader) error {
+	infoL.Println("loading database (compressed as gzip)")
+
+	zr, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+
+	err = db.Load(zr)
+	if err != nil {
+		return err
+	}
+
+	if err := zr.Close(); err != nil {
 		return err
 	}
 

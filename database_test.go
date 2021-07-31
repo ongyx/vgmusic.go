@@ -1,37 +1,38 @@
 package vgmusic
 
 import (
-	"bytes"
-	"fmt"
 	"os"
 	"testing"
 )
 
-var db *Database = NewDatabase()
+const (
+	DEBUGFILE = "database.json.gz"
+)
 
-func TestParseConsoles(t *testing.T) {
-	err := db.ParseConsoles()
+var (
+	db *Database = NewDatabase()
+)
+
+func TestLoad(t *testing.T) {
+	f, err := os.OpenFile(DEBUGFILE, os.O_RDONLY|os.O_CREATE, 0644)
 	if err != nil {
-		t.Fatalf(`error while parsing: %v`, err)
+		panic("failed to open debug.json")
 	}
-}
+	defer f.Close()
 
-func TestDumpAndLoad(t *testing.T) {
-	var buf bytes.Buffer
+	stat, _ := f.Stat()
+	if stat.Size() == 0 {
+		// debug file does not exist, refresh
+		err := db.ParseConsoles()
+		if err != nil {
+			t.Fatalf(`error while parsing: %v`, err)
+		}
 
-	_, err := db.Dump(&buf)
-	if err != nil {
-		t.Fatalf(`error while dumping: %v`, err)
-	}
-
-	fmt.Println(buf.String())
-
-	// reset db and reload
-	db = NewDatabase()
-	err = db.Load(&buf)
-
-	if err != nil {
-		t.Fatalf(`error while loading: %v`, err)
+	} else {
+		err = db.LoadC(f)
+		if err != nil {
+			t.Fatalf(`error while loading: %v`, err)
+		}
 	}
 }
 
@@ -42,15 +43,17 @@ func TestRefresh(t *testing.T) {
 		t.Fatalf(`error while refreshing: %v`, err)
 	}
 
-	// save to file for debugging purposes
-	f, err := os.OpenFile("debug.json", os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatalf(`error while saving to disk: %v`, err)
-	}
+}
 
-	_, err = db.Dump(f)
+func TestDump(t *testing.T) {
+	f, err := os.OpenFile(DEBUGFILE, os.O_WRONLY, 0644)
 	if err != nil {
-		t.Fatalf(`error while saving to disk: %v`, err)
+		panic("failed to open debug.json")
 	}
+	defer f.Close()
 
+	_, err = db.DumpC(f)
+	if err != nil {
+		t.Fatalf(`error while dumping: %v`, err)
+	}
 }

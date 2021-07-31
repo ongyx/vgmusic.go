@@ -2,7 +2,6 @@ package vgmusic
 
 import (
 	"errors"
-	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,31 +20,38 @@ type Console struct {
 }
 
 func (c *Console) parseSong(s *goquery.Selection) Song {
-	// first <td> tag has a <a href...> inside
-	nameSel := s.Eq(0).First()
-	title := nameSel.Text()
-	fname, _ := nameSel.Attr("href")
-	u := path.Join(c.Url, fname)
 
-	size, _ := strconv.Atoi(strings.ReplaceAll(s.Eq(1).Text(), " bytes", ""))
+	song := Song{Console: c.Name}
 
-	author := s.Eq(2).Text()
+	s.Find("td").Each(
+		func(i int, s *goquery.Selection) {
+			switch i {
 
-	// checksum is stored as a url
-	// extract the checksum out of the url
-	infoL.Println(s.Eq(3).First())
-	infoUrl, _ := s.Eq(3).First().Attr("href")
-	infoL.Println(u, title, size, author, s)
-	checksum := reChecksum.FindStringSubmatch(infoUrl)[1]
+			case 0:
+				// url and title
+				fname, _ := s.Find("a").Attr("href")
+				song.Url = c.Url + "/" + fname
+				song.Title = strings.Trim(s.Text(), "\r\n")
 
-	return Song{
-		Url:      u,
-		Title:    title,
-		Size:     size,
-		Author:   author,
-		Console:  c.Name,
-		Checksum: checksum,
-	}
+			case 1:
+				// size
+				song.Size, _ = strconv.Atoi(strings.ReplaceAll(s.Text(), " bytes", ""))
+
+			case 2:
+				// author
+				song.Author = strings.Trim(s.Text(), "\r\n")
+
+			case 3:
+				// checksum
+				u, _ := s.Find("a").Attr("href")
+				song.Checksum = reChecksum.FindStringSubmatch(u)[1]
+
+			}
+		},
+	)
+
+	return song
+
 }
 
 // Parse songs from this console into a slice.
@@ -69,6 +75,8 @@ func (c *Console) ParseSongs() ([]Song, error) {
 	etag := resp.Header.Get("ETag")
 	if etag == c.Etag {
 		return songs, nil // bail: console has been cached in the database already
+	} else {
+		c.Etag = etag
 	}
 
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
@@ -78,7 +86,8 @@ func (c *Console) ParseSongs() ([]Song, error) {
 
 	var game string
 
-	doc.Find("tr").Each(
+	// Take only the first table (there might be multiple)
+	doc.Find("table").First().Find("tr").Each(
 		func(i int, s *goquery.Selection) {
 			// skip first two rows
 			if i >= 2 {
