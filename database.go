@@ -17,7 +17,8 @@ import (
 )
 
 var (
-	BASE *url.URL
+	BASE     *url.URL
+	NEWFILES string = "https://www.vgmusic.com/new-files/index.php?&s1=date"
 )
 
 func init() {
@@ -98,6 +99,9 @@ func (db *Database) ParseConsoles() error {
 	// ensure there are no duplicates if refreshed twice
 	db.Consoles = nil
 	doc.Find("p.menu").Each(db.parseConsoles)
+
+	// new files - special console that doesn't exist but can still be parsed
+	//db.Consoles = append(db.Consoles, Console{Name: "New Files", Url: NEWFILES})
 
 	return nil
 }
