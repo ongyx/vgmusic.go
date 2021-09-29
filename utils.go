@@ -1,12 +1,16 @@
 package vgmusic
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 var (
@@ -32,4 +36,21 @@ func createLog(level string) *log.Logger {
 
 func okay(resp *http.Response) bool {
 	return (resp.StatusCode >= 200 && resp.StatusCode <= 200)
+}
+
+func toString(s *goquery.Selection) string {
+	return strings.Trim(s.Text(), "\r\n")
+}
+
+func download(u string) (*http.Response, error) {
+	resp, err := client.Get(u)
+	if err != nil {
+		return nil, err
+	}
+
+	if !okay(resp) {
+		return nil, errors.New("response not ok: " + strconv.Itoa(resp.StatusCode))
+	}
+
+	return resp, err
 }

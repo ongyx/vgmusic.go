@@ -23,7 +23,7 @@ func TestLoad(t *testing.T) {
 	stat, _ := f.Stat()
 	if stat.Size() == 0 {
 		// debug file does not exist, refresh
-		err := db.ParseConsoles()
+		err := db.Sync()
 		if err != nil {
 			t.Fatalf(`error while parsing: %v`, err)
 		}

@@ -25,21 +25,40 @@ func init() {
 	BASE, _ = url.Parse("https://vgmusic.com")
 }
 
+// DatabaseOptions affects the behaviour of database operations.
+type DatabaseOptions struct {
+	// Whether or not new-files (not in the archive yet) are to be added to the database.
+	// This may cause refreshes to take a long time.
+	RefreshNewFiles bool
+}
+
 type Database struct {
 	// Map of song's md5 checksum to the Song itself.
 	Entries map[string]Song `json:"entries"`
 	// Map of console name to the Console struct.
 	Consoles []Console `json:"consoles"`
+
+	options DatabaseOptions
+	mu      sync.RWMutex
 }
 
-type DatabaseStats struct {
-	NEntries  int
-	NConsoles int
+type stats struct {
+	Entries  int
+	Consoles int
 }
 
 // protected functions
 
-func (db *Database) parseConsoles(i int, s *goquery.Selection) {
+func (db *Database) add(songs ...Song) {
+	// make sure only one thread adds the entries at a time
+	db.mu.Lock()
+	for _, song := range songs {
+		db.Entries[song.Checksum] = song
+	}
+	db.mu.Unlock()
+}
+
+func (db *Database) sync(i int, s *goquery.Selection) {
 	// skip the first section
 	if i != 0 {
 
@@ -64,11 +83,52 @@ func (db *Database) parseConsoles(i int, s *goquery.Selection) {
 
 				infoL.Printf("adding system %s with url %s", name, fu)
 
-				db.Consoles = append(db.Consoles, Console{Name: name, Url: fu})
+				db.Consoles = append(db.Consoles, Console{Name: name, URL: fu})
 			},
 		)
 
 	}
+}
+
+func (db *Database) refresh(c *Console) error {
+	var parser Parser
+
+	if strings.Contains(c.URL, "new-files") {
+		if !db.options.RefreshNewFiles {
+			return nil // skip non-archive files
+		}
+
+		parser = NewFile
+	} else {
+		parser = Archive
+	}
+
+	resp, err := download(c.URL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if !c.MustParse(resp) {
+		infoL.Printf("skipping console %s, already parsed", c.Name)
+		return nil
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	songs, err := parser.Parse(c, doc)
+	if err != nil {
+		return err
+	}
+
+	db.add(songs...)
+
+	infoL.Printf("parsed %d songs for console %s", len(songs), c.Name)
+
+	return nil
 }
 
 // public functions
@@ -79,7 +139,8 @@ func NewDatabase() *Database {
 	}
 }
 
-func (db *Database) ParseConsoles() error {
+// Sync the list of consoles from the server.
+func (db *Database) Sync() error {
 	resp, err := client.Get(BASE.String())
 	if err != nil {
 		return err
@@ -98,20 +159,20 @@ func (db *Database) ParseConsoles() error {
 
 	// ensure there are no duplicates if refreshed twice
 	db.Consoles = nil
-	doc.Find("p.menu").Each(db.parseConsoles)
+	doc.Find("p.menu").Each(db.sync)
 
 	// new files - special console that doesn't exist but can still be parsed
-	//db.Consoles = append(db.Consoles, Console{Name: "New Files", Url: NEWFILES})
+	//db.Consoles = append(db.Consoles, Console{Name: "New Files", URL: NEWFILES})
 
 	return nil
 }
 
+// Refresh the database with new songs.
 func (db *Database) Refresh() error {
 
 	oldStats := db.Stats()
 
 	var g errgroup.Group
-	var mu sync.Mutex
 
 	for i := range db.Consoles {
 
@@ -122,22 +183,7 @@ func (db *Database) Refresh() error {
 			func() error {
 				// so console can be modified in-place
 				c := &db.Consoles[i]
-
-				songs, err := c.ParseSongs()
-				nSongs := len(songs)
-
-				if nSongs > 0 {
-					// make sure only one thread adds the entries at a time
-					mu.Lock()
-					for _, song := range songs {
-						db.Entries[song.Checksum] = song
-					}
-					mu.Unlock()
-				}
-
-				infoL.Printf("parsed %d songs for console %s", nSongs, c.Name)
-
-				return err
+				return db.refresh(c)
 			},
 		)
 
@@ -149,17 +195,17 @@ func (db *Database) Refresh() error {
 
 	infoL.Printf(
 		"refreshed database (%d new entries)",
-		newStats.NEntries-oldStats.NEntries,
+		newStats.Entries-oldStats.Entries,
 	)
 
 	return err
 
 }
 
-func (db *Database) Stats() DatabaseStats {
-	return DatabaseStats{
-		NEntries:  len(db.Entries),
-		NConsoles: len(db.Consoles),
+func (db *Database) Stats() stats {
+	return stats{
+		Entries:  len(db.Entries),
+		Consoles: len(db.Consoles),
 	}
 }
 
@@ -173,6 +219,16 @@ func (db *Database) Search(criteria func(s Song) bool) []Song {
 	}
 
 	return songs
+}
+
+// Set the database options.
+func (db *Database) SetOptions(o DatabaseOptions) {
+	db.options = o
+}
+
+// Get the database options.
+func (db *Database) Options() DatabaseOptions {
+	return db.options
 }
 
 func (db *Database) Dump(w io.Writer) (int, error) {
